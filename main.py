@@ -1,116 +1,78 @@
-from telethon import TelegramClient
-from telethon.sessions import StringSession
-from telethon.errors import FloodWaitError
-import asyncio, os
+from telethon import TelegramClient, events
+import asyncio, threading, os, glob
 from flask import Flask
-import threading
+from telethon.sessions import StringSession
 
-# --- TUS DATOS, CAMBIA ESTO ---
-API_ID = 32695956
-API_HASH = '8d939c8130ea03c01cd9abe6a6e83d7a'
-SESSION = os.environ.get("SESSION_STRING")
-CANAL_ORIGEN = 'https://t.me/Horny_J' # de donde copias
-GRUPO_DESTINO = -1003764262854 # a donde copias
-TOPIC_ID = 736414 # tu tema, si no tienes tema pon None
-# ------------------------------
+API_ID = int(os.environ.get("API_ID", "32695956"))
+API_HASH = os.environ.get("API_HASH", "8d939c8130ea03c01cd9abe6a6e83d7a")
+SESSION = os.environ.get("SESSION_STRING", "")
+GRUPO = int(os.environ.get("GRUPO_DESTINO", "-1003764262854"))
+TOPIC = int(os.environ.get("TOPIC_ID", "752770"))
+CANAL = os.environ.get("CANAL_ORIGEN", "https://t.me/Horny_J")
 
 app = Flask(__name__)
 @app.route('/')
 def home(): return "Bot vivo"
-threading.Thread(target=lambda: app.run(host='0.0.0.0', port=8080), daemon=True).start()
 
-async def cargar(client):
+threading.Thread(target=lambda: app.run(host='0.0.0.0', port=10000), daemon=True).start()
+
+if SESSION:
+    client = TelegramClient(StringSession(SESSION), API_ID, API_HASH)
+else:
+    s = glob.glob("*.session")
+    client = TelegramClient(s[0].replace('.session','') if s else 'sesion_nube', API_ID, API_HASH)
+
+async def cargar_progreso():
     try:
         async for m in client.iter_messages('me', limit=20):
-            if (m.text or "").startswith("PROGRESO_BOT:"):
+            if m.text and m.text.startswith("PROGRESO_BOT:"):
                 return int(m.text.split(":")[1].strip())
-    except: pass
+    except Exception as e:
+        print(f"No se pudo cargar progreso: {e}")
     return 0
 
-async def guardar(client, last_id):
+async def guardar_progreso(last_id):
     try:
         async for m in client.iter_messages('me', limit=20):
-            if (m.text or "").startswith("PROGRESO_BOT:"):
+            if m.text and m.text.startswith("PROGRESO_BOT:"):
                 await m.delete()
         await client.send_message('me', f"PROGRESO_BOT:{last_id}")
-    except: pass
-
-async def copiar_uno(client, d, m):
-    while True:
-        try:
-            if m.media:
-                await client.send_file(d, m.media, caption=m.text, reply_to=TOPIC_ID)
-            else:
-                await client.send_message(d, m.text, reply_to=TOPIC_ID)
-            return True
-        except FloodWaitError as e:
-            print(f"FRENO {e.seconds}s")
-            await asyncio.sleep(e.seconds + 5)
-        except Exception as e:
-            print(f"Error {m.id}: {e}")
-            await asyncio.sleep(5)
-            return False
-
-async def copiar_album(client, d, grupo):
-    files = [x.media for x in grupo if x.media]
-    if not files:
-        return
-    # Telegram solo deja 10 por álbum máximo
-    for i in range(0, len(files), 10):
-        chunk = files[i:i+10]
-        cap = grupo[0].text if i == 0 else ""
-        while True:
-            try:
-                await client.send_file(d, chunk, caption=cap, reply_to=TOPIC_ID)
-                break
-            except FloodWaitError as e:
-                print(f"FRENO {e.seconds}s")
-                await asyncio.sleep(e.seconds + 5)
-            except Exception as e:
-                print(f"Error álbum: {e}")
-                await asyncio.sleep(5)
-                break
+    except Exception as e:
+        print(f"Error guardando progreso: {e}")
 
 async def main():
-    client = TelegramClient(StringSession(SESSION), API_ID, API_HASH)
     await client.start()
-    last_id = await cargar(client)
+    print("CLIENTE CONECTADO OK")
+    o = await client.get_entity(CANAL)
+    d = await client.get_entity(GRUPO)
+    last_id = await cargar_progreso()
     print(f"ARRANCO DESDE: {last_id}")
-
-    o = await client.get_entity(CANAL_ORIGEN)
-    d = await client.get_entity(GRUPO_DESTINO)
-
-    # Traemos todos en orden, de viejo a nuevo
-    mensajes = []
     async for m in client.iter_messages(o, min_id=last_id, reverse=True):
-        mensajes.append(m)
-
-    ya_procesados = set()
-    for m in mensajes:
-        if m.id in ya_procesados:
-            continue
-        if m.id <= last_id:
-            continue
-
-        # Si no tiene grouped_id, es 1 solo
-        if not m.grouped_id:
-            if not (m.media or m.text):
-                last_id = m.id
-                continue
-            await copiar_uno(client, d, m)
+        if not (m.media or m.text):
             last_id = m.id
-            await guardar(client, last_id)
-            await asyncio.sleep(2)
-        else:
-            # Es un álbum, busca todos los del mismo grouped_id
-            grupo = [x for x in mensajes if x.grouped_id == m.grouped_id]
-            for x in grupo:
-                ya_procesados.add(x.id)
-            await copiar_album(client, d, grupo)
-            last_id = max(x.id for x in grupo)
-            await guardar(client, last_id)
+            continue
+        try:
+            if m.media:
+                await client.send_file(d, m.media, caption=m.text, reply_to=TOPIC)
+            else:
+                await client.send_message(d, m.text, reply_to=TOPIC)
+            print(f"Copiado {m.id}")
+            last_id = m.id
+            await guardar_progreso(last_id)
+            await asyncio.sleep(1)
+        except Exception as e:
+            print(e)
             await asyncio.sleep(3)
-
-    print("LISTO, COPIA TERMINADA")
+    print("HISTORIAL LISTO - EN VIVO")
+    @client.on(events.NewMessage(chats=CANAL))
+    async def h(e):
+        if not (e.message.media or e.message.text):
+            return
+        if e.message.media:
+            await client.send_file(d, e.message.media, caption=e.message.text, reply_to=TOPIC)
+        else:
+            await client.send_message(d, e.message.text, reply_to=TOPIC)
+        await guardar_progreso(e.message.id)
+    await client.run_until_disconnected()
 
 asyncio.run(main())
